@@ -921,6 +921,9 @@ function runOct13To19WeekProcessor() {
     Logger.log("10月13-19日週間データをスプレッドシートにエクスポート中...");
     exportWeeklyRankingsToSpreadsheet(octWeekResults);
     
+    // Update URL average ranking sheet for this specific week
+    updateUrlAverageRankingSheet(octWeekResults, dailyData);
+    
     Logger.log("=== 10月13-19日週間データ処理完了 ===");
     
   } catch (error) {
@@ -997,6 +1000,14 @@ function runWeeklyProcessor() {
     // ステップ4: 週間ランキングデータをスプレッドシートにエクスポート
     Logger.log("\nステップ4: 週間ランキングデータをエクスポート中...");
     exportWeeklyRankingsToSpreadsheet(weeklyResults);
+    
+    // ステップ4.5: URL平均掲載順位シートを更新
+    Logger.log("\nステップ4.5: URL平均掲載順位シートを更新中...");
+    updateUrlAverageRankingSheet(weeklyResults, dailyData);
+    
+    // ステップ4.6: 国別URL平均掲載順位シートを更新
+    Logger.log("\nステップ4.6: 国別URL平均掲載順位シートを更新中...");
+    createCountryUrlAverageSheets(weeklyResults, dailyData);
     
     // ステップ5: 有効な場合にチャートを生成
     if (WEEKLY_CONFIG.historicalTracking) {
@@ -1614,6 +1625,1543 @@ function exportWeeklyRankingsToSpreadsheet(weeklyResults) {
   } catch (error) {
     Logger.log(`Weekly ranking export error: ${error.message}`);
     throw error;
+  }
+}
+
+/**
+ * Update "URLと平均掲載順位" sheet with the latest week's average rankings
+ * @param {Object} weeklyResults - Weekly processing result object
+ */
+function updateUrlAverageRankingSheet(weeklyResults, dailyData) {
+  try {
+    Logger.log("Updating URL average ranking sheet...");
+    
+    if (!weeklyResults || !weeklyResults.weeklyData || weeklyResults.weeklyData.length === 0) {
+      Logger.log("No weekly data available to update URL averages.");
+      return;
+    }
+    
+    const weeklyData = weeklyResults.weeklyData.filter(row => row && row.week && row.pageUrl);
+    if (weeklyData.length === 0) {
+      Logger.log("Weekly data does not include week keys or URLs. Skipping update.");
+      return;
+    }
+    
+    // Determine the most recent week key
+    const weekKeys = Array.from(new Set(weeklyData.map(row => row.week)));
+    if (weekKeys.length === 0) {
+      Logger.log("No week keys found in weekly data. Skipping URL average update.");
+      return;
+    }
+    
+    const sortedWeeks = weekKeys
+      .map(weekKey => ({ weekKey, date: getWeekDateFromKey(weekKey) }))
+      .sort((a, b) => {
+        if (a.date && b.date) {
+          return b.date.getTime() - a.date.getTime();
+        }
+        if (a.date && !b.date) return -1;
+        if (!a.date && b.date) return 1;
+        return 0;
+      });
+    
+    const latestEntry = sortedWeeks.find(entry => entry.date) || sortedWeeks[0];
+    if (!latestEntry) {
+      Logger.log("Could not determine latest week entry. Skipping URL average update.");
+      return;
+    }
+    
+    const latestWeekKey = latestEntry.weekKey;
+    
+    Logger.log(`Latest week for URL averages: ${latestWeekKey}`);
+    
+    const spreadsheet = getOrCreateSpreadsheet();
+    let sheet = spreadsheet.getSheetByName("URLと平均掲載順位");
+    
+    if (!sheet) {
+      Logger.log("URLと平均掲載順位 sheet not found. Creating new sheet...");
+      sheet = spreadsheet.insertSheet("URLと平均掲載順位");
+    }
+    
+    ensureUrlAverageSheetStructure(sheet);
+    
+    // Build average position map per URL for the latest week
+    const urlAverageMap = calculateWeeklyAveragePositionByUrl(weeklyData, latestWeekKey);
+    const totalUrlsWithData = Object.keys(urlAverageMap).length;
+    Logger.log(`Calculated averages from weekly data for ${totalUrlsWithData} URLs.`);
+    
+    // Identify URL rows from column B (starting row 3)
+    const lastRow = sheet.getLastRow();
+    if (lastRow < 3) {
+      Logger.log("No URL rows found (rows 3+). Skipping update.");
+      return;
+    }
+    
+    const urlRange = sheet.getRange(3, 2, lastRow - 2, 1);
+    const urlValues = urlRange.getValues();
+    const richTextValues = urlRange.getRichTextValues();
+    const formulaValues = urlRange.getFormulas();
+    const urlRows = [];
+    urlValues.forEach((row, index) => {
+      const cellValue = row[0];
+      const richText = richTextValues[index] ? richTextValues[index][0] : null;
+      const formula = formulaValues[index] ? formulaValues[index][0] : null;
+      const extractedUrl = extractUrlFromCell(cellValue, richText, formula);
+      const normalized = normalizeUrl(extractedUrl);
+      if (normalized) {
+        urlRows.push({
+          rowIndex: index + 3,
+          url: extractedUrl || cellValue,
+          normalizedUrl: normalized
+        });
+      }
+    });
+    
+    if (urlRows.length === 0) {
+      Logger.log("No valid URLs listed in column B (rows 3+). Skipping update.");
+      return;
+    }
+    
+    // Find if the latest week already exists in the sheet (row 2)
+    const lastColumn = sheet.getLastColumn();
+    let targetColumnIndex = null;
+    
+    if (lastColumn >= 3) {
+      const weekHeaderRange = sheet.getRange(2, 3, 1, lastColumn - 2);
+      const weekHeaderValues = weekHeaderRange.getValues()[0] || [];
+      weekHeaderValues.forEach((value, idx) => {
+        if (value && value.toString() === latestWeekKey) {
+          targetColumnIndex = idx + 3;
+        }
+      });
+    }
+    
+    if (!targetColumnIndex) {
+      // Insert new column at column C to keep the newest week first
+      Logger.log(`Inserting new week column at C for ${latestWeekKey}`);
+      sheet.insertColumnBefore(3);
+      targetColumnIndex = 3;
+    }
+    
+    // Update headers for the target column
+    sheet.getRange(1, targetColumnIndex).setValue("平均掲載順位");
+    sheet.getRange(1, targetColumnIndex).setBackground("#d9ead3");
+    sheet.getRange(2, targetColumnIndex).setValue(latestWeekKey);
+    sheet.getRange(2, targetColumnIndex).setBackground("#d9ead3");
+    
+    // Write averages for each URL row
+    const numberFormatRows = Math.max(urlRows.length, 1);
+    sheet.getRange(3, targetColumnIndex, numberFormatRows, 1).setNumberFormat("0");
+    
+    // Fill missing URLs by recalculating directly from daily data if available
+    const missingUrlKeys = new Set();
+    urlRows.forEach(rowInfo => {
+      if (!(rowInfo.normalizedUrl in urlAverageMap)) {
+        missingUrlKeys.add(rowInfo.normalizedUrl);
+      }
+    });
+    
+    if (missingUrlKeys.size > 0 && dailyData && dailyData.length > 0) {
+      Logger.log(`Recalculating averages from daily data for ${missingUrlKeys.size} URLs not found in weekly aggregates.`);
+      const targetWeekRange = getWeekRangeFromKey(latestWeekKey);
+      if (targetWeekRange) {
+        const fallbackMap = calculateWeeklyAveragePositionFromDailyData(
+          dailyData,
+          targetWeekRange,
+          missingUrlKeys
+        );
+        Object.keys(fallbackMap).forEach(urlKey => {
+          urlAverageMap[urlKey] = fallbackMap[urlKey];
+        });
+      } else {
+        Logger.log("Could not parse week range from week key; skipping daily data fallback.");
+      }
+    }
+    
+    // Prepare data array for batch writing
+    // If no position value exists, leave cell empty (blank) instead of 0
+    const columnValues = urlRows.map(rowInfo => {
+      const value = urlAverageMap[rowInfo.normalizedUrl];
+      // If value exists and is a valid number, return rounded integer
+      // If value doesn't exist (undefined/null), return empty string to leave cell blank
+      if (typeof value === "number" && !isNaN(value)) {
+        return Math.round(value);
+      } else {
+        return ''; // Empty string = blank cell (will trigger white color formatting)
+      }
+    });
+    
+    // Batch write data
+    const dataRange = sheet.getRange(3, targetColumnIndex, columnValues.length, 1);
+    const valuesArray = columnValues.map(v => [v === '' ? '' : v]);
+    dataRange.setValues(valuesArray);
+    dataRange.setNumberFormat("0");
+    
+    // Apply conditional formatting (same as last 3 weeks function)
+    Logger.log("Applying conditional formatting to weekly average position column...");
+    const positionRange = sheet.getRange(3, targetColumnIndex, urlRows.length, 1);
+    const columnLetter = getColumnLetter(targetColumnIndex);
+    
+    // Get existing rules to preserve them
+    const existingRules = sheet.getConditionalFormatRules();
+    const newRules = [];
+    
+    // Copy existing rules
+    existingRules.forEach(rule => {
+      newRules.push(rule);
+    });
+    
+    // Add rules for this column
+    // White for position 0 (no data) - using whenNumberLessThan to catch 0
+    // Note: Empty cells will remain unformatted (default background)
+    newRules.push(SpreadsheetApp.newConditionalFormatRule()
+      .whenNumberLessThan(0.5)
+      .setBackground('#ffffff') // White
+      .setRanges([positionRange])
+      .build());
+    
+    // Green for positions 1-3
+    newRules.push(SpreadsheetApp.newConditionalFormatRule()
+      .whenNumberBetween(1, 3)
+      .setBackground('#d9ead3') // Light green
+      .setRanges([positionRange])
+      .build());
+    
+    // Yellow for positions 4-15
+    newRules.push(SpreadsheetApp.newConditionalFormatRule()
+      .whenNumberBetween(4, 15)
+      .setBackground('#fff2cc') // Light yellow
+      .setRanges([positionRange])
+      .build());
+    
+    // Red for positions > 15
+    newRules.push(SpreadsheetApp.newConditionalFormatRule()
+      .whenNumberGreaterThan(15)
+      .setBackground('#f4cccc') // Light red
+      .setRanges([positionRange])
+      .build());
+    
+    // Apply all rules
+    try {
+      sheet.setConditionalFormatRules(newRules);
+      Logger.log(`Applied conditional formatting to column ${targetColumnIndex} for week ${latestWeekKey}`);
+    } catch (formatError) {
+      Logger.log(`Warning: Could not apply conditional formatting rules: ${formatError.message}`);
+    }
+    
+    Logger.log(`Updated ${urlRows.length} URL rows for week ${latestWeekKey} (with color formatting).`);
+    
+    // Create/update chart for top 20 average position trend
+    createTop10AverageChart(sheet);
+    
+  } catch (error) {
+    Logger.log(`Error updating URL average ranking sheet: ${error.message}`);
+  }
+}
+
+/**
+ * Create/update country-specific URL average position sheets
+ * Creates sheets for: 米国, カナダ, イギリス, オーストラリア
+ * @param {Object} weeklyResults - Weekly processing result object
+ * @param {Array} dailyData - Daily data (for fallback)
+ */
+function createCountryUrlAverageSheets(weeklyResults, dailyData) {
+  try {
+    Logger.log("=== Creating Country-Specific URL Average Position Sheets ===");
+    
+    if (!weeklyResults || !weeklyResults.weeklyData || weeklyResults.weeklyData.length === 0) {
+      Logger.log("No weekly data available. Skipping country sheets creation.");
+      return;
+    }
+    
+    // Get URLs and structure from "URLと平均掲載順位" sheet
+    const spreadsheet = getOrCreateSpreadsheet();
+    const mainSheet = spreadsheet.getSheetByName("URLと平均掲載順位");
+    
+    if (!mainSheet) {
+      Logger.log("URLと平均掲載順位 sheet not found. Cannot create country sheets.");
+      return;
+    }
+    
+    // Get URLs from main sheet
+    const urlRows = getUrlsFromMainSheet(mainSheet);
+    if (urlRows.length === 0) {
+      Logger.log("No URLs found in main sheet. Skipping country sheets creation.");
+      return;
+    }
+    
+    // Get all week keys from main sheet
+    const rawWeekKeys = getWeekKeysFromMainSheet(mainSheet);
+    
+    // Deduplicate week keys using normalized comparison and filter out numeric values
+    const uniqueWeekKeys = [];
+    const seenNormalized = new Set();
+    
+    rawWeekKeys.forEach(weekKey => {
+      // Skip numeric values (not valid week strings)
+      if (isNumericValue(weekKey)) {
+        Logger.log(`Skipping numeric week key "${weekKey}" from main sheet`);
+        return;
+      }
+      
+      const normalized = normalizeWeekKeyForComparison(weekKey);
+      if (normalized && !seenNormalized.has(normalized)) {
+        seenNormalized.add(normalized);
+        uniqueWeekKeys.push(weekKey); // Keep the first occurrence's original format
+      }
+    });
+    
+    Logger.log(`Found ${rawWeekKeys.length} week keys in main sheet, deduplicated to ${uniqueWeekKeys.length} unique weeks: ${uniqueWeekKeys.join(', ')}`);
+    
+    // Countries to create sheets for
+    const countries = ["米国", "カナダ", "イギリス", "オーストラリア"];
+    
+    // Create/update each country sheet
+    countries.forEach(country => {
+      try {
+        Logger.log(`\nProcessing ${country}...`);
+        updateCountryUrlAverageSheet(country, weeklyResults.weeklyData, dailyData, urlRows, uniqueWeekKeys);
+      } catch (countryError) {
+        Logger.log(`Error processing ${country}: ${countryError.message}`);
+      }
+    });
+    
+    Logger.log("=== Country-Specific URL Average Position Sheets Complete ===");
+    
+  } catch (error) {
+    Logger.log(`Error creating country URL average sheets: ${error.message}`);
+    Logger.log(`Error stack: ${error.stack}`);
+  }
+}
+
+/**
+ * Get URLs from the main "URLと平均掲載順位" sheet
+ * @param {GoogleAppsScript.Spreadsheet.Sheet} sheet
+ * @return {Array} Array of URL row objects
+ */
+function getUrlsFromMainSheet(sheet) {
+  const urlRows = [];
+  const lastRow = sheet.getLastRow();
+  
+  if (lastRow < 3) {
+    return urlRows;
+  }
+  
+  const urlRange = sheet.getRange(3, 2, lastRow - 2, 1);
+  const urlValues = urlRange.getValues();
+  const richTextValues = urlRange.getRichTextValues();
+  const formulaValues = urlRange.getFormulas();
+  
+  urlValues.forEach((row, index) => {
+    const cellValue = row[0];
+    const richText = richTextValues[index] ? richTextValues[index][0] : null;
+    const formula = formulaValues[index] ? formulaValues[index][0] : null;
+    const extractedUrl = extractUrlFromCell(cellValue, richText, formula);
+    const normalized = normalizeUrl(extractedUrl);
+    if (normalized) {
+      urlRows.push({
+        rowIndex: index + 3,
+        url: extractedUrl || cellValue,
+        normalizedUrl: normalized
+      });
+    }
+  });
+  
+  return urlRows;
+}
+
+/**
+ * Get all week keys from the main "URLと平均掲載順位" sheet (row 2, columns C+)
+ * @param {GoogleAppsScript.Spreadsheet.Sheet} sheet
+ * @return {Array} Array of week key strings
+ */
+function getWeekKeysFromMainSheet(sheet) {
+  const weekKeys = [];
+  const lastColumn = sheet.getLastColumn();
+  
+  if (lastColumn < 3) {
+    return weekKeys;
+  }
+  
+  const weekHeaderRange = sheet.getRange(2, 3, 1, lastColumn - 2);
+  const weekHeaderValues = weekHeaderRange.getValues()[0] || [];
+  
+  weekHeaderValues.forEach((value, idx) => {
+    if (value && value.toString().trim()) {
+      const weekKey = value.toString().trim();
+      // Skip numeric values that are not valid week strings
+      if (isNumericValue(weekKey)) {
+        Logger.log(`Skipping numeric week key from header: "${weekKey}"`);
+        return;
+      }
+      // Skip header text
+      if (weekKey !== "週" && weekKey !== "平均掲載順位") {
+        weekKeys.push(weekKey);
+      }
+    }
+  });
+  
+  return weekKeys;
+}
+
+/**
+ * Update country-specific URL average position sheet
+ * @param {string} country - Country name (米国, カナダ, イギリス, オーストラリア)
+ * @param {Array} weeklyData - Weekly aggregated data
+ * @param {Array} dailyData - Daily data (for fallback)
+ * @param {Array} urlRows - URL rows from main sheet
+ * @param {Array} weekKeys - Week keys to process
+ */
+function updateCountryUrlAverageSheet(country, weeklyData, dailyData, urlRows, weekKeys) {
+  try {
+    Logger.log(`Updating ${country} URL average position sheet...`);
+    
+    const spreadsheet = getOrCreateSpreadsheet();
+    const sheetName = `${country}URL平均掲載順位`;
+    let sheet = spreadsheet.getSheetByName(sheetName);
+    
+    if (!sheet) {
+      Logger.log(`Creating new sheet: ${sheetName}`);
+      sheet = spreadsheet.insertSheet(sheetName);
+    }
+    
+    // Ensure sheet structure
+    ensureCountryUrlAverageSheetStructure(sheet, urlRows);
+    
+    // Process each week
+    const startColumn = 3; // Start at column C
+    const existingWeekColumns = {};
+    
+    // Find existing week columns - check ALL week keys in the country sheet
+    const lastColumn = sheet.getLastColumn();
+    if (lastColumn >= 3) {
+      const weekHeaderRange = sheet.getRange(2, 3, 1, lastColumn - 2);
+      const weekHeaderValues = weekHeaderRange.getValues()[0] || [];
+      weekHeaderValues.forEach((value, idx) => {
+        if (value && value.toString().trim()) {
+          const existingWeekKey = value.toString().trim();
+          // Skip "週" header text
+          if (existingWeekKey !== "週" && existingWeekKey !== "平均掲載順位") {
+            // Store all existing week keys, not just those in weekKeys array
+            existingWeekColumns[existingWeekKey] = idx + 3;
+          }
+        }
+      });
+    }
+    
+    Logger.log(`Found ${Object.keys(existingWeekColumns).length} existing week columns in ${country} sheet: ${Object.keys(existingWeekColumns).join(', ')}`);
+    Logger.log(`Processing ${weekKeys.length} weeks from main sheet: ${weekKeys.join(', ')}`);
+    
+    // Cache for calculated averages to avoid recalculating the same week
+    const calculatedAveragesCache = new Map();
+    
+    // Process each week
+    weekKeys.forEach((weekKey, weekIndex) => {
+      // Skip numeric values early (before expensive calculations)
+      if (isNumericValue(weekKey)) {
+        Logger.log(`Skipping numeric week key "${weekKey}" for ${country}`);
+        return;
+      }
+      
+      const targetColumn = startColumn + weekIndex;
+      
+      // Check if this week key already exists in the country sheet
+      // Use exact match first, then try normalized comparison
+      let existingColumn = existingWeekColumns[weekKey];
+      
+      // If exact match not found, try to find by normalizing both values
+      if (!existingColumn) {
+        const normalizedTarget = normalizeWeekKeyForComparison(weekKey);
+        for (const [existingKey, colIndex] of Object.entries(existingWeekColumns)) {
+          const normalizedExisting = normalizeWeekKeyForComparison(existingKey);
+          // Try exact match after normalization
+          if (normalizedTarget === normalizedExisting) {
+            existingColumn = colIndex;
+            Logger.log(`Found existing column for ${country} week ${weekKey} (matches existing "${existingKey}") at column ${existingColumn}`);
+            break;
+          }
+        }
+      } else {
+        Logger.log(`Found exact match for ${country} week ${weekKey} at column ${existingColumn}`);
+      }
+      
+      // Additional safety check: verify the target column doesn't already have this week
+      if (!existingColumn && targetColumn <= lastColumn) {
+        const targetWeekValue = sheet.getRange(2, targetColumn).getValue();
+        if (targetWeekValue && targetWeekValue.toString().trim()) {
+          const targetWeekKey = targetWeekValue.toString().trim();
+          const normalizedTarget = normalizeWeekKeyForComparison(weekKey);
+          const normalizedExisting = normalizeWeekKeyForComparison(targetWeekKey);
+          if (normalizedTarget === normalizedExisting) {
+            existingColumn = targetColumn;
+            Logger.log(`Found existing week at target column ${targetColumn} for ${country} week ${weekKey}`);
+          }
+        }
+      }
+      
+      // Check cache first to avoid recalculating the same week
+      const cacheKey = `${country}|${weekKey}`;
+      let countryAverageMap = calculatedAveragesCache.get(cacheKey);
+      
+      if (!countryAverageMap) {
+        // Calculate country-specific averages for this week
+        countryAverageMap = calculateCountryWeeklyAveragePositionByUrl(
+          weeklyData, 
+          weekKey, 
+          country,
+          dailyData
+        );
+        // Cache the result
+        calculatedAveragesCache.set(cacheKey, countryAverageMap);
+      } else {
+        Logger.log(`Using cached averages for ${country} week ${weekKey}`);
+      }
+      
+      // Prepare data array
+      const columnValues = urlRows.map(rowInfo => {
+        const value = countryAverageMap[rowInfo.normalizedUrl];
+        if (typeof value === "number" && !isNaN(value)) {
+          return Math.round(value);
+        } else {
+          return ''; // Empty string = blank cell
+        }
+      });
+      
+      if (existingColumn) {
+        // Update existing column
+        Logger.log(`Updating existing column for ${country} week ${weekKey} at column ${existingColumn}`);
+        
+        const dataRange = sheet.getRange(3, existingColumn, columnValues.length, 1);
+        const valuesArray = columnValues.map(v => [v === '' ? '' : v]);
+        dataRange.setValues(valuesArray);
+        dataRange.setNumberFormat("0");
+        
+        // Apply conditional formatting
+        applyCountryUrlAverageFormatting(sheet, existingColumn, urlRows.length);
+      } else {
+        // Final safety check: scan ALL columns one more time to see if this week already exists anywhere
+        // (This catches cases where normalization might have missed it earlier)
+        const normalizedTarget = normalizeWeekKeyForComparison(weekKey);
+        const currentLastColumn = sheet.getLastColumn();
+        let foundDuplicate = false;
+        
+        for (let scanCol = 3; scanCol <= currentLastColumn; scanCol++) {
+          const scanValue = sheet.getRange(2, scanCol).getValue();
+          if (scanValue && scanValue.toString().trim()) {
+            const scanKey = scanValue.toString().trim();
+            if (scanKey !== "週" && scanKey !== "平均掲載順位") {
+              const normalizedScan = normalizeWeekKeyForComparison(scanKey);
+              if (normalizedTarget === normalizedScan) {
+                Logger.log(`WARNING: Week ${weekKey} already exists at column ${scanCol} (as "${scanKey}"). Updating existing column instead of creating duplicate.`);
+                existingColumn = scanCol;
+                foundDuplicate = true;
+                // Update existing column instead
+                const dataRange = sheet.getRange(3, existingColumn, columnValues.length, 1);
+                const valuesArray = columnValues.map(v => [v === '' ? '' : v]);
+                dataRange.setValues(valuesArray);
+                dataRange.setNumberFormat("0");
+                applyCountryUrlAverageFormatting(sheet, existingColumn, urlRows.length);
+                break;
+              }
+            }
+          }
+        }
+        
+        // If we found a duplicate, skip creating new column
+        if (foundDuplicate) {
+          return; // Skip creating new column
+        }
+        
+        // Always insert new week column at column C (position 3)
+        // This will push all existing week columns to the right
+        const newColumnPosition = 3; // Column C
+        Logger.log(`Inserting new column for ${country} week ${weekKey} at column ${newColumnPosition} (column C)`);
+        
+        // Insert column before column C (which pushes existing columns to the right)
+        sheet.insertColumnBefore(newColumnPosition);
+        
+        const actualTargetColumn = newColumnPosition;
+        
+        // Set headers
+        sheet.getRange(1, actualTargetColumn, 1, 1).setValues([["平均掲載順位"]]);
+        sheet.getRange(1, actualTargetColumn, 1, 1).setBackground("#d9ead3");
+        sheet.getRange(2, actualTargetColumn, 1, 1).setValues([[weekKey]]);
+        sheet.getRange(2, actualTargetColumn, 1, 1).setBackground("#d9ead3");
+        
+        // Write data
+        const dataRange = sheet.getRange(3, actualTargetColumn, columnValues.length, 1);
+        const valuesArray = columnValues.map(v => [v === '' ? '' : v]);
+        dataRange.setValues(valuesArray);
+        dataRange.setNumberFormat("0");
+        
+        // Apply conditional formatting
+        applyCountryUrlAverageFormatting(sheet, actualTargetColumn, urlRows.length);
+        
+        Logger.log(`Created new column for ${country} week ${weekKey} at column ${actualTargetColumn}`);
+      }
+    });
+    
+    Logger.log(`Updated ${urlRows.length} URL rows for ${country} across ${weekKeys.length} weeks`);
+    
+    // Create/update chart for top 20 average position trend
+    createTop10AverageChart(sheet);
+    
+  } catch (error) {
+    Logger.log(`Error updating ${country} URL average sheet: ${error.message}`);
+    Logger.log(`Error stack: ${error.stack}`);
+  }
+}
+
+/**
+ * Calculate country-specific weekly average position per URL
+ * @param {Array} weeklyData - Weekly aggregated data
+ * @param {string} targetWeekKey - Week key to filter
+ * @param {string} country - Country name (米国, カナダ, イギリス, オーストラリア)
+ * @param {Array} dailyData - Daily data (for fallback)
+ * @return {Object} url -> average position
+ */
+function calculateCountryWeeklyAveragePositionByUrl(weeklyData, targetWeekKey, country, dailyData) {
+  // Filter weekly data by country and week
+  const countryWeekData = weeklyData.filter(row => 
+    row && 
+    row.week === targetWeekKey && 
+    row.pageUrl && 
+    row.country === country
+  );
+  
+  // If we have data, calculate averages
+  if (countryWeekData.length > 0) {
+    return calculateWeeklyAveragePositionByUrl(countryWeekData, targetWeekKey);
+  }
+  
+  // Fallback to daily data if no weekly data
+  if (dailyData && dailyData.length > 0) {
+    Logger.log(`No weekly data for ${country} week ${targetWeekKey}, calculating from daily data...`);
+    const weekRange = getWeekRangeFromKey(targetWeekKey);
+    if (weekRange) {
+      // Filter daily data by country and week range
+      const countryDailyData = dailyData.filter(row => 
+        row && 
+        row.pageUrl && 
+        row.country === country &&
+        row.date
+      );
+      
+      if (countryDailyData.length > 0) {
+        return calculateWeeklyAveragePositionFromDailyData(
+          countryDailyData,
+          weekRange,
+          null // Calculate for all URLs
+        );
+      }
+    }
+  }
+  
+  return {}; // No data available
+}
+
+/**
+ * Ensure country URL average sheet has baseline structure
+ * @param {GoogleAppsScript.Spreadsheet.Sheet} sheet
+ * @param {Array} urlRows - URL rows to populate
+ */
+function ensureCountryUrlAverageSheetStructure(sheet, urlRows) {
+  // Ensure minimum columns
+  while (sheet.getLastColumn() < 3) {
+    sheet.insertColumnAfter(sheet.getLastColumn());
+  }
+  
+  // Set headers
+  const headers = ["Date", "URL", "平均掲載順位"];
+  headers.forEach((header, idx) => {
+    const col = idx + 1;
+    const current = sheet.getRange(1, col).getValue();
+    if (!current) {
+      sheet.getRange(1, col).setValue(header);
+    }
+  });
+  
+  sheet.getRange(1, 1, 1, sheet.getLastColumn()).setBackground("#d9ead3");
+  
+  // Set week header
+  const weekCell = sheet.getRange(2, 3);
+  if (!weekCell.getValue()) {
+    weekCell.setValue("週");
+  }
+  
+  const weekHeaderWidth = Math.max(1, sheet.getLastColumn() - 2);
+  sheet.getRange(2, 3, 1, weekHeaderWidth).setBackground("#d9ead3");
+  
+  // Get Date column data from main "URLと平均掲載順位" sheet
+  const spreadsheet = getOrCreateSpreadsheet();
+  const mainSheet = spreadsheet.getSheetByName("URLと平均掲載順位");
+  
+  if (mainSheet) {
+    const mainLastRow = mainSheet.getLastRow();
+    if (mainLastRow >= 3) {
+      // Get Date column data from main sheet (column A, rows 3+)
+      const dateRange = mainSheet.getRange(3, 1, mainLastRow - 2, 1);
+      const dateValues = dateRange.getValues();
+      
+      // Copy dates to country sheet column A
+      const lastRow = sheet.getLastRow();
+      const targetRowCount = Math.max(urlRows.length, dateValues.length);
+      
+      if (targetRowCount > 0) {
+        // Prepare date values array (match the number of URL rows)
+        const dateArray = [];
+        for (let i = 0; i < urlRows.length; i++) {
+          if (i < dateValues.length) {
+            dateArray.push([dateValues[i][0]]);
+          } else {
+            dateArray.push(['']); // Empty if no date available
+          }
+        }
+        
+        // Write dates to column A starting from row 3
+        if (dateArray.length > 0) {
+          const countryDateRange = sheet.getRange(3, 1, dateArray.length, 1);
+          countryDateRange.setValues(dateArray);
+          Logger.log(`Copied ${dateArray.length} date values from main sheet to column A`);
+        }
+      }
+    }
+  }
+  
+  // Populate URLs in column B (if not already populated)
+  const lastRow = sheet.getLastRow();
+  if (lastRow < 3 || !sheet.getRange(3, 2).getValue()) {
+    // Write URLs starting from row 3
+    urlRows.forEach((rowInfo, index) => {
+      const row = index + 3;
+      sheet.getRange(row, 2).setValue(rowInfo.url);
+    });
+  }
+}
+
+/**
+ * Apply conditional formatting to country URL average position column
+ * @param {GoogleAppsScript.Spreadsheet.Sheet} sheet
+ * @param {number} columnIndex - Column index to format
+ * @param {number} numRows - Number of data rows
+ */
+function applyCountryUrlAverageFormatting(sheet, columnIndex, numRows) {
+  try {
+    const positionRange = sheet.getRange(3, columnIndex, numRows, 1);
+    const columnLetter = getColumnLetter(columnIndex);
+    
+    // Get existing rules
+    const existingRules = sheet.getConditionalFormatRules();
+    const newRules = [];
+    
+    // Copy existing rules
+    existingRules.forEach(rule => {
+      newRules.push(rule);
+    });
+    
+    // Add rules for this column
+    // White for position 0 (no data) - using whenNumberLessThan to catch 0
+    // Note: Empty cells will remain unformatted (default background)
+    newRules.push(SpreadsheetApp.newConditionalFormatRule()
+      .whenNumberLessThan(0.5)
+      .setBackground('#ffffff')
+      .setRanges([positionRange])
+      .build());
+    
+    // Green for positions 1-3
+    newRules.push(SpreadsheetApp.newConditionalFormatRule()
+      .whenNumberBetween(1, 3)
+      .setBackground('#d9ead3')
+      .setRanges([positionRange])
+      .build());
+    
+    // Yellow for positions 4-15
+    newRules.push(SpreadsheetApp.newConditionalFormatRule()
+      .whenNumberBetween(4, 15)
+      .setBackground('#fff2cc')
+      .setRanges([positionRange])
+      .build());
+    
+    // Red for positions > 15
+    newRules.push(SpreadsheetApp.newConditionalFormatRule()
+      .whenNumberGreaterThan(15)
+      .setBackground('#f4cccc')
+      .setRanges([positionRange])
+      .build());
+    
+    // Apply rules
+    try {
+      sheet.setConditionalFormatRules(newRules);
+    } catch (formatError) {
+      Logger.log(`Warning: Could not apply conditional formatting: ${formatError.message}`);
+    }
+  } catch (error) {
+    Logger.log(`Error applying formatting: ${error.message}`);
+  }
+}
+
+/**
+ * Ensure the "URLと平均掲載順位" sheet has baseline structure
+ * @param {GoogleAppsScript.Spreadsheet.Sheet} sheet
+ */
+function ensureUrlAverageSheetStructure(sheet) {
+  while (sheet.getLastColumn() < 3) {
+    sheet.insertColumnAfter(sheet.getLastColumn());
+  }
+  
+  const headers = ["Date", "URL", "平均掲載順位"];
+  headers.forEach((header, idx) => {
+    const col = idx + 1;
+    const current = sheet.getRange(1, col).getValue();
+    if (!current) {
+      sheet.getRange(1, col).setValue(header);
+    }
+  });
+  
+  sheet.getRange(1, 1, 1, sheet.getLastColumn()).setBackground("#d9ead3");
+  
+  const weekCell = sheet.getRange(2, 3);
+  if (!weekCell.getValue()) {
+    weekCell.setValue("週");
+  }
+  
+  const weekHeaderWidth = Math.max(1, sheet.getLastColumn() - 2);
+  sheet.getRange(2, 3, 1, weekHeaderWidth).setBackground("#d9ead3");
+}
+
+/**
+ * Calculate weighted average position per URL for the specified week
+ * @param {Array} weeklyData
+ * @param {string} targetWeekKey
+ * @return {Object} url -> average position
+ */
+function calculateWeeklyAveragePositionByUrl(weeklyData, targetWeekKey) {
+  const stats = {};
+  
+  weeklyData.forEach(row => {
+    if (!row || row.week !== targetWeekKey || !row.pageUrl) {
+      return;
+    }
+    
+    const urlKey = normalizeUrl(row.pageUrl);
+    if (!urlKey) return;
+    
+    if (!stats[urlKey]) {
+      stats[urlKey] = {
+        weightedPosition: 0,
+        weight: 0,
+        fallbackSum: 0,
+        count: 0
+      };
+    }
+    
+    const weight = row.impressions && row.impressions > 0
+      ? row.impressions
+      : (row.clicks && row.clicks > 0 ? row.clicks : (row.count || 1));
+    
+    stats[urlKey].weightedPosition += (row.position || 0) * weight;
+    stats[urlKey].weight += weight;
+    stats[urlKey].fallbackSum += (row.position || 0);
+    stats[urlKey].count += 1;
+  });
+  
+  const averages = {};
+  Object.keys(stats).forEach(urlKey => {
+    const stat = stats[urlKey];
+    if (stat.weight > 0) {
+      averages[urlKey] = Math.round(stat.weightedPosition / stat.weight);
+    } else if (stat.count > 0) {
+      averages[urlKey] = Math.round(stat.fallbackSum / stat.count);
+    } else {
+      averages[urlKey] = null;
+    }
+  });
+  
+  return averages;
+}
+
+/**
+ * Calculate weighted average positions for specific URLs directly from daily data
+ * @param {Array} dailyData
+ * @param {Object} weekRange - { start: Date, end: Date }
+ * @param {Set<string>} targetUrlKeys - normalized URLs to include
+ * @return {Object} urlKey -> average
+ */
+function calculateWeeklyAveragePositionFromDailyData(dailyData, weekRange, targetUrlKeys) {
+  if (!dailyData || !weekRange || !weekRange.start || !weekRange.end) {
+    return {};
+  }
+  
+  const stats = {};
+  const hasTargetFilter = targetUrlKeys && targetUrlKeys.size > 0;
+  
+  dailyData.forEach(row => {
+    if (!row || !row.pageUrl || !row.date) return;
+    const normalizedUrl = normalizeUrl(row.pageUrl);
+    if (!normalizedUrl) return;
+    if (hasTargetFilter && !targetUrlKeys.has(normalizedUrl)) return;
+    
+    const rowDate = new Date(row.date);
+    if (isNaN(rowDate.getTime())) return;
+    if (rowDate < weekRange.start || rowDate > weekRange.end) return;
+    
+    if (!stats[normalizedUrl]) {
+      stats[normalizedUrl] = {
+        weightedPosition: 0,
+        weight: 0,
+        fallbackSum: 0,
+        count: 0
+      };
+    }
+    
+    const weight = row.impressions && row.impressions > 0
+      ? row.impressions
+      : (row.clicks && row.clicks > 0 ? row.clicks : 1);
+    
+    stats[normalizedUrl].weightedPosition += (row.averagePosition || row.position || 0) * weight;
+    stats[normalizedUrl].weight += weight;
+    stats[normalizedUrl].fallbackSum += (row.averagePosition || row.position || 0);
+    stats[normalizedUrl].count += 1;
+  });
+  
+  const averages = {};
+  Object.keys(stats).forEach(urlKey => {
+    const stat = stats[urlKey];
+    if (stat.weight > 0) {
+      averages[urlKey] = Math.round(stat.weightedPosition / stat.weight);
+    } else if (stat.count > 0) {
+      averages[urlKey] = Math.round(stat.fallbackSum / stat.count);
+    } else {
+      averages[urlKey] = null;
+    }
+  });
+  
+  return averages;
+}
+
+/**
+ * Convert a week key string to explicit start/end dates
+ * @param {string} weekKey
+ * @return {Object|null} { start: Date, end: Date }
+ */
+function getWeekRangeFromKey(weekKey) {
+  if (!weekKey || typeof weekKey !== "string") {
+    return null;
+  }
+  
+  try {
+    if (weekKey.includes("-")) {
+      const parts = weekKey.split("-");
+      const startParts = parts[0].trim().split("/");
+      const endParts = parts[1].trim().split("/");
+      
+      if (startParts.length === 3 && endParts.length === 3) {
+        const startDate = new Date(
+          parseInt(startParts[0], 10),
+          parseInt(startParts[1], 10) - 1,
+          parseInt(startParts[2], 10)
+        );
+        const endDate = new Date(
+          parseInt(endParts[0], 10),
+          parseInt(endParts[1], 10) - 1,
+          parseInt(endParts[2], 10)
+        );
+        endDate.setHours(23, 59, 59, 999);
+        
+        if (!isNaN(startDate.getTime()) && !isNaN(endDate.getTime())) {
+          return { start: startDate, end: endDate };
+        }
+      }
+    }
+    
+    const parsed = new Date(weekKey);
+    if (!isNaN(parsed.getTime())) {
+      const endDate = new Date(parsed);
+      endDate.setDate(parsed.getDate() + 6);
+      endDate.setHours(23, 59, 59, 999);
+      return { start: parsed, end: endDate };
+    }
+  } catch (error) {
+    Logger.log(`Failed to parse week range from key "${weekKey}": ${error.message}`);
+  }
+  
+  return null;
+}
+
+/**
+ * Convert column number to column letter (1 = A, 2 = B, etc.)
+ * @param {number} columnNumber - Column number (1-based)
+ * @return {string} Column letter(s)
+ */
+function getColumnLetter(columnNumber) {
+  let result = '';
+  while (columnNumber > 0) {
+    columnNumber--;
+    result = String.fromCharCode(65 + (columnNumber % 26)) + result;
+    columnNumber = Math.floor(columnNumber / 26);
+  }
+  return result;
+}
+
+/**
+ * Check if a value is numeric (not a valid week string)
+ * @param {*} value - Value to check
+ * @return {boolean} True if value is numeric, false if it's a valid week string
+ */
+function isNumericValue(value) {
+  if (value === null || value === undefined) {
+    return false;
+  }
+  
+  // If it's already a number type, it's numeric
+  if (typeof value === 'number') {
+    return true;
+  }
+  
+  // Convert to string and check
+  const str = String(value).trim();
+  
+  // Empty string is not numeric
+  if (str === '') {
+    return false;
+  }
+  
+  // Check if it's a pure number (integer or decimal)
+  // This regex matches: optional sign, digits, optional decimal point and digits
+  const numericPattern = /^-?\d+(\.\d+)?$/;
+  if (numericPattern.test(str)) {
+    return true;
+  }
+  
+  // Check if it can be parsed as a number and is not NaN
+  const parsed = parseFloat(str);
+  if (!isNaN(parsed) && isFinite(parsed)) {
+    // Additional check: if the string representation matches the parsed number exactly,
+    // it's likely a number, not a week string
+    if (String(parsed) === str || String(parseInt(str, 10)) === str) {
+      return true;
+    }
+  }
+  
+  // If it contains date separators like "/", "-", or "_", it's likely a week string
+  if (str.includes('/') || str.includes('-') || str.includes('_')) {
+    return false;
+  }
+  
+  // If it contains spaces (like "2025/11/10 - 2025/11/16"), it's likely a week string
+  if (str.includes(' ')) {
+    return false;
+  }
+  
+  return false;
+}
+
+/**
+ * Normalize week key for comparison (handles different date formats)
+ * @param {string} weekKey - Week key string (e.g., "2024-11-03_2024-11-09" or "2024/11/03 - 2024/11/09")
+ * @return {string} Normalized week key for comparison
+ */
+function normalizeWeekKeyForComparison(weekKey) {
+  if (!weekKey || typeof weekKey !== "string") {
+    return "";
+  }
+  
+  // Remove all whitespace
+  let normalized = weekKey.toString().trim().replace(/\s+/g, "");
+  
+  // Normalize date separators: convert "/" and "-" to consistent format
+  // Handle format: "2024-11-03_2024-11-09" or "2024/11/03-2024/11/09" or "2024/11/03 - 2024/11/09"
+  normalized = normalized.replace(/\//g, "-");
+  
+  // Handle underscore separator
+  normalized = normalized.replace(/_/g, "-");
+  
+  // Remove any duplicate separators
+  normalized = normalized.replace(/-+/g, "-");
+  
+  return normalized.toLowerCase();
+}
+
+/**
+ * Normalize URLs for consistent matching
+ * @param {string} url
+ * @return {string}
+ */
+function normalizeUrl(url) {
+  if (!url || typeof url !== "string") {
+    return "";
+  }
+  
+  let cleaned = url.trim();
+  if (!cleaned) {
+    return "";
+  }
+  
+  try {
+    if (!/^https?:\/\//i.test(cleaned)) {
+      cleaned = `https://${cleaned}`;
+    }
+    
+    const parsed = new URL(cleaned);
+    let host = parsed.hostname.toLowerCase().replace(/^www\./, "");
+    let pathname = parsed.pathname || "/";
+    
+    pathname = pathname.replace(/\/+/g, "/");
+    if (pathname.length > 1 && pathname.endsWith("/")) {
+      pathname = pathname.slice(0, -1);
+    }
+    
+    // Remove common AMP suffixes
+    pathname = pathname.replace(/\/amp$/i, "");
+    
+    return `${host}${pathname}`.toLowerCase();
+  } catch (error) {
+    cleaned = cleaned
+      .replace(/^https?:\/\//i, "")
+      .replace(/^www\./i, "");
+    
+    cleaned = cleaned.split(/[?#]/)[0];
+    cleaned = cleaned.replace(/\/+/g, "/");
+    if (cleaned.length > 1 && cleaned.endsWith("/")) {
+      cleaned = cleaned.slice(0, -1);
+    }
+    
+    return cleaned.toLowerCase();
+  }
+}
+
+/**
+ * Extract actual URL from a cell that might contain rich text or HYPERLINK formulas
+ * @param {any} cellValue
+ * @param {GoogleAppsScript.Spreadsheet.RichTextValue} richTextValue
+ * @param {string} formula
+ * @return {string}
+ */
+function extractUrlFromCell(cellValue, richTextValue, formula) {
+  try {
+    if (richTextValue) {
+      const directLink = richTextValue.getLinkUrl();
+      if (directLink) {
+        return directLink;
+      }
+      const runs = richTextValue.getRuns ? richTextValue.getRuns() : [];
+      for (let i = 0; i < runs.length; i++) {
+        const run = runs[i];
+        if (run && typeof run.getLinkUrl === "function") {
+          const runLink = run.getLinkUrl();
+          if (runLink) {
+            return runLink;
+          }
+        }
+      }
+    }
+    
+    if (formula && typeof formula === "string" && formula.toUpperCase().startsWith("=HYPERLINK")) {
+      const match = formula.match(/=HYPERLINK\(\s*"([^"]+)"/i);
+      if (match && match[1]) {
+        return match[1];
+      }
+    }
+    
+    if (cellValue && typeof cellValue === "string") {
+      return cellValue;
+    }
+    
+    return "";
+  } catch (error) {
+    Logger.log(`Error extracting URL from cell: ${error.message}`);
+    return typeof cellValue === "string" ? cellValue : "";
+  }
+}
+
+/**
+ * Convert a week key string (e.g., "2025/10/20 - 2025/10/26") to a Date for sorting
+ * @param {string} weekKey
+ * @return {Date|null}
+ */
+function getWeekDateFromKey(weekKey) {
+  if (!weekKey || typeof weekKey !== "string") {
+    return null;
+  }
+  
+  try {
+    if (weekKey.includes("-")) {
+      const start = weekKey.split("-")[0].trim();
+      const parts = start.split("/");
+      if (parts.length === 3) {
+        const year = parseInt(parts[0], 10);
+        const month = parseInt(parts[1], 10) - 1;
+        const day = parseInt(parts[2], 10);
+        const date = new Date(year, month, day);
+        return isNaN(date.getTime()) ? null : date;
+      }
+    }
+    
+    const parsed = new Date(weekKey);
+    return isNaN(parsed.getTime()) ? null : parsed;
+  } catch (error) {
+    Logger.log(`Failed to parse week key "${weekKey}": ${error.message}`);
+    return null;
+  }
+}
+
+/**
+ * Standalone function to calculate and update last 3 weeks average position
+ * Can be called directly from Apps Script editor
+ */
+function runLast3WeeksAveragePosition() {
+  try {
+    Logger.log("=== Running Last 3 Weeks Average Position Calculation ===");
+    
+    // Get daily data from spreadsheet
+    const dailyData = getDailyDataFromSpreadsheet();
+    if (!dailyData || dailyData.length === 0) {
+      Logger.log("No daily data found. Please run main() function first.");
+      return;
+    }
+    
+    // Process weekly data
+    const weeklyProcessor = new WeeklyProcessor();
+    const weeklyResults = weeklyProcessor.processWeeklyRankings(dailyData);
+    
+    if (!weeklyResults || !weeklyResults.weeklyData) {
+      Logger.log("No weekly data available. Skipping.");
+      return;
+    }
+    
+    // Update URL average ranking sheet with last 3 weeks
+    updateUrlAverageRankingSheetLast3Weeks(weeklyResults.weeklyData, dailyData);
+    
+    Logger.log("=== Last 3 Weeks Average Position Update Complete ===");
+    
+  } catch (error) {
+    Logger.log(`Error in runLast3WeeksAveragePosition: ${error.message}`);
+    Logger.log(`Error stack: ${error.stack}`);
+  }
+}
+
+/**
+ * Get weekly average position for the last 3 weeks (rounded to integers)
+ * Calculates averages for: 11/3-11/9, 10/27-11/2, 10/20-10/26
+ * @param {Array} weeklyData - Weekly aggregated data
+ * @param {Array} dailyData - Daily data (for fallback calculation)
+ * @return {Object} Object with week keys and URL average positions (integers)
+ */
+function getLast3WeeksAveragePosition(weeklyData, dailyData) {
+  try {
+    Logger.log("=== Calculating Last 3 Weeks Average Position ===");
+    
+    // Define the 3 target weeks (assuming 2025)
+    const targetWeeks = [      
+      "2025/11/10 - 2025/11/16",
+      "2025/11/03 - 2025/11/09",  // Week 1: 11/3-11/9
+      "2025/10/27 - 2025/11/02",  // Week 2: 10/27-11/2
+    ];
+    
+    const result = {};
+    
+    targetWeeks.forEach(weekKey => {
+      Logger.log(`Processing week: ${weekKey}`);
+      
+      // Try to calculate from weekly data first
+      let urlAverageMap = calculateWeeklyAveragePositionByUrl(weeklyData, weekKey);
+      
+      // If no data found in weekly aggregates, try daily data fallback
+      if (Object.keys(urlAverageMap).length === 0 && dailyData && dailyData.length > 0) {
+        Logger.log(`No weekly data found for ${weekKey}, calculating from daily data...`);
+        const weekRange = getWeekRangeFromKey(weekKey);
+        if (weekRange) {
+          urlAverageMap = calculateWeeklyAveragePositionFromDailyData(
+            dailyData,
+            weekRange,
+            null // null means calculate for all URLs
+          );
+        }
+      }
+      
+      // Round all values to integers
+      const integerAverages = {};
+      Object.keys(urlAverageMap).forEach(urlKey => {
+        const value = urlAverageMap[urlKey];
+        if (value !== null && value !== undefined && !isNaN(value)) {
+          integerAverages[urlKey] = Math.round(value);
+        } else {
+          integerAverages[urlKey] = 0;
+        }
+      });
+      
+      result[weekKey] = integerAverages;
+      Logger.log(`Calculated ${Object.keys(integerAverages).length} URL averages for ${weekKey}`);
+    });
+    
+    Logger.log("=== Last 3 Weeks Average Position Calculation Complete ===");
+    return result;
+    
+  } catch (error) {
+    Logger.log(`Error calculating last 3 weeks average position: ${error.message}`);
+    Logger.log(`Error stack: ${error.stack}`);
+    return {};
+  }
+}
+
+/**
+ * Update URL average ranking sheet with last 3 weeks data (integer values)
+ * @param {Array} weeklyData - Weekly aggregated data
+ * @param {Array} dailyData - Daily data (for fallback)
+ */
+function updateUrlAverageRankingSheetLast3Weeks(weeklyData, dailyData) {
+  try {
+    Logger.log("=== Updating URL Average Ranking Sheet with Last 3 Weeks ===");
+    
+    // Get the last 3 weeks average positions
+    const last3WeeksData = getLast3WeeksAveragePosition(weeklyData, dailyData);
+    
+    if (!last3WeeksData || Object.keys(last3WeeksData).length === 0) {
+      Logger.log("No data available for last 3 weeks. Skipping update.");
+      return;
+    }
+    
+    const spreadsheet = getOrCreateSpreadsheet();
+    let sheet = spreadsheet.getSheetByName("URLと平均掲載順位");
+    
+    if (!sheet) {
+      Logger.log("URLと平均掲載順位 sheet not found. Creating new sheet...");
+      sheet = spreadsheet.insertSheet("URLと平均掲載順位");
+    }
+    
+    ensureUrlAverageSheetStructure(sheet);
+    
+    // Get URLs from column B (starting row 3)
+    const lastRow = sheet.getLastRow();
+    if (lastRow < 3) {
+      Logger.log("No URL rows found (rows 3+). Skipping update.");
+      return;
+    }
+    
+    const urlRange = sheet.getRange(3, 2, lastRow - 2, 1);
+    const urlValues = urlRange.getValues();
+    const richTextValues = urlRange.getRichTextValues();
+    const formulaValues = urlRange.getFormulas();
+    const urlRows = [];
+    
+    urlValues.forEach((row, index) => {
+      const cellValue = row[0];
+      const richText = richTextValues[index] ? richTextValues[index][0] : null;
+      const formula = formulaValues[index] ? formulaValues[index][0] : null;
+      const extractedUrl = extractUrlFromCell(cellValue, richText, formula);
+      const normalized = normalizeUrl(extractedUrl);
+      if (normalized) {
+        urlRows.push({
+          rowIndex: index + 3,
+          url: extractedUrl || cellValue,
+          normalizedUrl: normalized
+        });
+      }
+    });
+    
+    if (urlRows.length === 0) {
+      Logger.log("No valid URLs listed in column B (rows 3+). Skipping update.");
+      return;
+    }
+    
+    // Define week order (newest first)
+    const weekKeys = [
+      "2025/11/10 - 2025/11/16",
+      "2025/11/03 - 2025/11/09",  // Week 1: 11/3-11/9 (newest)
+      "2025/10/27 - 2025/11/02",  // Week 2: 10/27-11/2
+    ];
+    
+    // Check existing columns and update/create as needed
+    const lastColumn = sheet.getLastColumn();
+    const startColumn = 3; // Start at column C
+    
+    // First, find all existing week columns
+    const existingWeekColumns = {};
+    if (lastColumn >= 3) {
+      const weekHeaderRange = sheet.getRange(2, 3, 1, lastColumn - 2);
+      const weekHeaderValues = weekHeaderRange.getValues()[0] || [];
+      weekHeaderValues.forEach((value, idx) => {
+        if (value && value.toString()) {
+          const weekKeyStr = value.toString();
+          if (weekKeys.includes(weekKeyStr)) {
+            existingWeekColumns[weekKeyStr] = idx + 3;
+          }
+        }
+      });
+    }
+    
+    // Prepare all data for batch writing
+    const columnsToCreate = [];
+    const columnsToUpdate = [];
+    const allDataValues = [];
+    const allFormatRanges = [];
+    
+    // Process each week in order
+    weekKeys.forEach((weekKey, weekIndex) => {
+      const targetColumn = startColumn + weekIndex;
+      const weekData = last3WeeksData[weekKey] || {};
+      
+      // Prepare data array for this column (batch write)
+      // If no position value exists, leave cell empty (blank) instead of 0
+      const columnValues = urlRows.map(rowInfo => {
+        const value = weekData[rowInfo.normalizedUrl];
+        // If value exists and is a valid number, return rounded integer
+        // If value doesn't exist (undefined/null), return empty string to leave cell blank
+        if (typeof value === "number" && !isNaN(value)) {
+          return Math.round(value);
+        } else {
+          return ''; // Empty string = blank cell (will trigger white color formatting)
+        }
+      });
+      allDataValues.push(columnValues);
+      
+      if (existingWeekColumns[weekKey]) {
+        // Update existing column
+        const existingColumn = existingWeekColumns[weekKey];
+        Logger.log(`Updating existing column for week ${weekKey} at column ${existingColumn}`);
+        columnsToUpdate.push({
+          column: existingColumn,
+          weekKey: weekKey,
+          values: columnValues
+        });
+        allFormatRanges.push({
+          range: sheet.getRange(3, existingColumn, urlRows.length, 1),
+          column: existingColumn
+        });
+      } else {
+        // Need to create new column
+        columnsToCreate.push({
+          column: targetColumn,
+          weekKey: weekKey,
+          values: columnValues
+        });
+        allFormatRanges.push({
+          range: sheet.getRange(3, targetColumn, urlRows.length, 1),
+          column: targetColumn
+        });
+      }
+    });
+    
+    // Batch create columns first
+    if (columnsToCreate.length > 0) {
+      Logger.log(`Creating ${columnsToCreate.length} new columns...`);
+      const maxColumn = Math.max(...columnsToCreate.map(c => c.column));
+      const currentLastColumn = sheet.getLastColumn();
+      if (maxColumn > currentLastColumn) {
+        const columnsToInsert = maxColumn - currentLastColumn;
+        for (let i = 0; i < columnsToInsert; i++) {
+          sheet.insertColumnAfter(sheet.getLastColumn());
+        }
+      }
+      
+        // Batch write headers and data for new columns
+      columnsToCreate.forEach(colInfo => {
+        // Set headers
+        sheet.getRange(1, colInfo.column, 1, 1).setValues([["平均掲載順位"]]);
+        sheet.getRange(1, colInfo.column, 1, 1).setBackground("#d9ead3");
+        sheet.getRange(2, colInfo.column, 1, 1).setValues([[colInfo.weekKey]]);
+        sheet.getRange(2, colInfo.column, 1, 1).setBackground("#d9ead3");
+        
+        // Batch write data
+        // Empty strings will leave cells blank (triggers white color formatting)
+        const dataRange = sheet.getRange(3, colInfo.column, colInfo.values.length, 1);
+        const valuesArray = colInfo.values.map(v => [v === '' ? '' : v]);
+        dataRange.setValues(valuesArray);
+        dataRange.setNumberFormat("0");
+        
+        Logger.log(`Created new column for week ${colInfo.weekKey} at column ${colInfo.column}`);
+      });
+    }
+    
+    // Batch update existing columns
+    if (columnsToUpdate.length > 0) {
+      Logger.log(`Updating ${columnsToUpdate.length} existing columns...`);
+      columnsToUpdate.forEach(colInfo => {
+        // Batch write data
+        // Empty strings will leave cells blank (triggers white color formatting)
+        const dataRange = sheet.getRange(3, colInfo.column, colInfo.values.length, 1);
+        const valuesArray = colInfo.values.map(v => [v === '' ? '' : v]);
+        dataRange.setValues(valuesArray);
+        dataRange.setNumberFormat("0");
+      });
+    }
+    
+    // Apply conditional formatting to all 3 week columns (same as 全サイトデータ sheet)
+    Logger.log("Applying conditional formatting to weekly average position columns...");
+    
+    // Get existing rules to preserve them
+    const existingRules = sheet.getConditionalFormatRules();
+    const newRules = [];
+    
+    // Copy existing rules (limit to avoid too many rules)
+    existingRules.forEach(rule => {
+      newRules.push(rule);
+    });
+    
+    // Add rules for each week column
+    weekKeys.forEach((weekKey, weekIndex) => {
+      const targetColumn = startColumn + weekIndex;
+      const existingColumn = existingWeekColumns[weekKey] || targetColumn;
+      const positionRange = sheet.getRange(3, existingColumn, urlRows.length, 1);
+      const columnLetter = getColumnLetter(existingColumn);
+      
+      // White for position 0 (no data) - use lessThan(0.5) to catch 0
+      // Note: Empty cells will remain unformatted (default background)
+      // This rule must be first to take priority
+      newRules.push(SpreadsheetApp.newConditionalFormatRule()
+        .whenNumberLessThan(0.5)
+        .setBackground('#ffffff') // White
+        .setRanges([positionRange])
+        .build());
+      
+      // Green for positions 1-3
+      newRules.push(SpreadsheetApp.newConditionalFormatRule()
+        .whenNumberBetween(1, 3)
+        .setBackground('#d9ead3') // Light green
+        .setRanges([positionRange])
+        .build());
+      
+      // Yellow for positions 4-15
+      newRules.push(SpreadsheetApp.newConditionalFormatRule()
+        .whenNumberBetween(4, 15)
+        .setBackground('#fff2cc') // Light yellow
+        .setRanges([positionRange])
+        .build());
+      
+      // Red for positions > 15
+      newRules.push(SpreadsheetApp.newConditionalFormatRule()
+        .whenNumberGreaterThan(15)
+        .setBackground('#f4cccc') // Light red
+        .setRanges([positionRange])
+        .build());
+      
+      Logger.log(`Added conditional formatting rules for column ${existingColumn} (week ${weekKey})`);
+    });
+    
+    // Apply all rules at once (only if we have new rules)
+    if (newRules.length > existingRules.length) {
+      try {
+        sheet.setConditionalFormatRules(newRules);
+        Logger.log(`Applied conditional formatting to ${weekKeys.length} week columns`);
+      } catch (formatError) {
+        Logger.log(`Warning: Could not apply all conditional formatting rules: ${formatError.message}`);
+        // Try to apply just the new rules if total is too many
+        if (newRules.length > 100) {
+          Logger.log("Too many conditional formatting rules. Skipping formatting to avoid timeout.");
+        }
+      }
+    }
+    
+    Logger.log(`Updated ${urlRows.length} URL rows for last 3 weeks (integer values with color formatting)`);
+    
+    // Create/update chart for top 20 average position trend
+    createTop10AverageChart(sheet);
+    
+    Logger.log("=== URL Average Ranking Sheet Update Complete ===");
+    
+  } catch (error) {
+    Logger.log(`Error updating URL average ranking sheet for last 3 weeks: ${error.message}`);
+    Logger.log(`Error stack: ${error.stack}`);
   }
 }
 
@@ -2336,5 +3884,296 @@ function createTrendDashboard() {
   } catch (error) {
     Logger.log(`Error creating trend dashboard: ${error.message}`);
     throw error;
+  }
+}
+
+/**
+ * Calculate the average of top 20 lowest average positions for each week
+ * Gets week data directly from the provided sheet (works for main sheet or country sheets)
+ * Limits to last 12 weeks if available, only includes weeks with valid data
+ * @param {GoogleAppsScript.Spreadsheet.Sheet} sheet - The sheet to analyze (main or country sheet)
+ * @return {Array} Array of [weekKey, average] pairs
+ */
+function calculateTop10AverageByWeek(sheet) {
+  try {
+    // Get week keys directly from this sheet (works for any sheet including country sheets)
+    let weekKeys = getWeekKeysFromMainSheet(sheet);
+    if (weekKeys.length === 0) {
+      Logger.log("No week keys found for top 20 average calculation");
+      return [];
+    }
+    
+    // Deduplicate week keys using normalized comparison
+    const uniqueWeekKeys = [];
+    const seenNormalized = new Set();
+    
+    weekKeys.forEach(weekKey => {
+      const normalized = normalizeWeekKeyForComparison(weekKey);
+      if (normalized && !seenNormalized.has(normalized)) {
+        seenNormalized.add(normalized);
+        uniqueWeekKeys.push(weekKey); // Keep the first occurrence's original format
+      }
+    });
+    
+    Logger.log(`Deduplicated ${weekKeys.length} week keys to ${uniqueWeekKeys.length} unique weeks`);
+    
+    // Limit to last 12 weeks (if available)
+    // First, sort by date (newest first) to get the most recent weeks
+    const weekKeysWithDates = uniqueWeekKeys.map(weekKey => ({
+      weekKey: weekKey,
+      date: getWeekDateFromKey(weekKey)
+    })).filter(item => item.date !== null)
+      .sort((a, b) => b.date.getTime() - a.date.getTime()); // Newest first
+    
+    // Take only the last 12 weeks (most recent) - or all available if less than 12
+    const recentWeeks = weekKeysWithDates.slice(0, 12);
+    const finalWeekKeys = recentWeeks.map(item => item.weekKey);
+    
+    Logger.log(`Limiting chart to last ${finalWeekKeys.length} weeks (out of ${weekKeysWithDates.length} total unique weeks available in sheet)`);
+    
+    const lastRow = sheet.getLastRow();
+    if (lastRow < 3) {
+      Logger.log("No URL rows found for top 20 average calculation");
+      return [];
+    }
+    
+    const urlCount = lastRow - 2; // URLs start at row 3
+    
+    // Get week column indices
+    const lastColumn = sheet.getLastColumn();
+    const weekData = [];
+    const processedWeeks = new Set(); // Track processed weeks to avoid duplicates
+    
+    finalWeekKeys.forEach(weekKey => {
+      // Skip if we've already processed this week (normalized)
+      const normalized = normalizeWeekKeyForComparison(weekKey);
+      if (processedWeeks.has(normalized)) {
+        Logger.log(`Skipping duplicate week ${weekKey} (already processed)`);
+        return;
+      }
+      
+      // Find column for this week using normalized comparison
+      let weekColumn = null;
+      if (lastColumn >= 3) {
+        const weekHeaderRange = sheet.getRange(2, 3, 1, lastColumn - 2);
+        const weekHeaderValues = weekHeaderRange.getValues()[0] || [];
+        const normalizedTarget = normalizeWeekKeyForComparison(weekKey);
+        
+        weekHeaderValues.forEach((value, idx) => {
+          if (value && value.toString().trim()) {
+            const existingKey = value.toString().trim();
+            // Skip header text
+            if (existingKey !== "週" && existingKey !== "平均掲載順位") {
+              const normalizedExisting = normalizeWeekKeyForComparison(existingKey);
+              // Use normalized comparison to find matching column
+              if (normalizedTarget === normalizedExisting && !weekColumn) {
+                weekColumn = idx + 3;
+              }
+            }
+          }
+        });
+      }
+      
+      if (!weekColumn) {
+        Logger.log(`Week column not found for ${weekKey}`);
+        return;
+      }
+      
+      // Mark this week as processed
+      processedWeeks.add(normalized);
+      
+      // Get all position values for this week
+      const positionRange = sheet.getRange(3, weekColumn, urlCount, 1);
+      const positionValues = positionRange.getValues().map(row => row[0]);
+      
+      // Filter valid numbers (exclude empty strings, null, 0)
+      const validPositions = positionValues
+        .filter(val => typeof val === 'number' && !isNaN(val) && val > 0)
+        .sort((a, b) => a - b); // Sort ascending (lowest first)
+      
+      if (validPositions.length === 0) {
+        Logger.log(`No valid positions found for week ${weekKey}`);
+        return;
+      }
+      
+      // Get top 20 lowest positions
+      const top20 = validPositions.slice(0, Math.min(20, validPositions.length));
+      
+      // Calculate average
+      const sum = top20.reduce((acc, val) => acc + val, 0);
+      const average = sum / top20.length;
+      
+      weekData.push([weekKey, Math.round(average * 100) / 100]); // Round to 2 decimals
+      
+      Logger.log(`Week ${weekKey}: Top 20 average = ${average.toFixed(2)} (from ${top20.length} URLs)`);
+    });
+    
+    // Sort by week date (oldest first for chart)
+    weekData.sort((a, b) => {
+      const dateA = getWeekDateFromKey(a[0]);
+      const dateB = getWeekDateFromKey(b[0]);
+      if (dateA && dateB) {
+        return dateA.getTime() - dateB.getTime();
+      }
+      return 0;
+    });
+    
+    // Final deduplication check on the weekData array itself
+    const finalWeekData = [];
+    const finalSeen = new Set();
+    weekData.forEach(([weekKey, average]) => {
+      // Skip if weekKey is a number (not a valid week string)
+      if (isNumericValue(weekKey)) {
+        Logger.log(`Skipping numeric value "${weekKey}" - not a valid week string`);
+        return;
+      }
+      
+      const normalized = normalizeWeekKeyForComparison(weekKey);
+      if (!finalSeen.has(normalized)) {
+        finalSeen.add(normalized);
+        finalWeekData.push([weekKey, average]);
+      }
+    });
+    
+    Logger.log(`Final chart data: ${finalWeekData.length} unique weeks (removed ${weekData.length - finalWeekData.length} duplicates/non-weeks)`);
+    
+    return finalWeekData;
+    
+  } catch (error) {
+    Logger.log(`Error calculating top 20 average by week: ${error.message}`);
+    return [];
+  }
+}
+
+/**
+ * Create or update chart showing top 20 average position trend
+ * Chart is positioned at I4 (column 9, row 4)
+ * @param {GoogleAppsScript.Spreadsheet.Sheet} sheet - The sheet to add chart to
+ */
+function createTop10AverageChart(sheet) {
+  try {
+    Logger.log("Creating/updating top 20 average position chart...");
+    
+    // Calculate top 20 averages for each week
+    const weekData = calculateTop10AverageByWeek(sheet);
+    
+    if (weekData.length === 0) {
+      Logger.log("No data available for chart. Skipping chart creation.");
+      return;
+    }
+    
+    Logger.log(`Chart data: ${weekData.length} weeks`);
+    
+    // Remove existing chart (remove all charts and recreate to ensure clean state)
+    // Since we can't reliably identify charts by title, we'll remove all and recreate
+    const existingCharts = sheet.getCharts();
+    if (existingCharts.length > 0) {
+      // Try to identify and remove the top 20 average chart
+      // Check charts near I4 position (column 9, row 4)
+      existingCharts.forEach(chart => {
+        try {
+          const chartTitle = chart.getOptions().get('title');
+          if (chartTitle && (chartTitle.toString().includes('トップ20平均') || 
+                             chartTitle.toString().includes('トップ10平均') ||
+                             chartTitle.toString().includes('Top 20') ||
+                             chartTitle.toString().includes('Top 10'))) {
+            sheet.removeChart(chart);
+            Logger.log("Removed existing top 20 average chart");
+          }
+        } catch (e) {
+          // If we can't check, continue - we'll recreate anyway
+        }
+      });
+    }
+    
+    // Prepare chart data: [Week, Average Position]
+    // Use a hidden column to store chart data (after last data column)
+    const lastColumn = sheet.getLastColumn();
+    const chartDataStartCol = lastColumn + 2; // Start 2 columns after data
+    
+    // Ensure we have enough columns
+    const neededColumns = chartDataStartCol + 1 - sheet.getMaxColumns();
+    if (neededColumns > 0) {
+      // Add columns if needed (though this shouldn't be necessary usually)
+      for (let i = 0; i < neededColumns; i++) {
+        sheet.insertColumnAfter(sheet.getLastColumn());
+      }
+    }
+    
+    // Filter out any numeric week values before creating chart data
+    const validWeekData = weekData.filter(([week, avg]) => {
+      // Skip if week is a number (not a valid week string)
+      if (isNumericValue(week)) {
+        Logger.log(`Skipping numeric week value "${week}" in chart data`);
+        return false;
+      }
+      return true;
+    });
+    
+    if (validWeekData.length === 0) {
+      Logger.log("No valid week strings found for chart. Skipping chart creation.");
+      return;
+    }
+    
+    // Write chart data: Header row + data rows
+    // Ensure week values are written as text strings (prepend with apostrophe or format as text)
+    const chartData = [
+      ['週', 'トップ10平均順位'], // Header
+      ...validWeekData.map(([week, avg]) => [String(week), avg]) // Convert week to string explicitly
+    ];
+    
+    const chartDataRange = sheet.getRange(1, chartDataStartCol, chartData.length, 2);
+    chartDataRange.setValues(chartData);
+    
+    // Format week column as text to ensure it displays as labels, not numbers
+    const weekColumnRange = sheet.getRange(1, chartDataStartCol, chartData.length, 1); // Include header
+    weekColumnRange.setNumberFormat('@'); // '@' means text format - forces text interpretation
+    
+    // Format average column as number
+    const avgColumnRange = sheet.getRange(2, chartDataStartCol + 1, validWeekData.length, 1);
+    avgColumnRange.setNumberFormat('0'); // Integer format
+    
+    // Hide the chart data columns
+    sheet.hideColumns(chartDataStartCol, 2);
+    
+    // Create chart ranges
+    const xAxisRange = sheet.getRange(2, chartDataStartCol, validWeekData.length, 1); // Weeks (skip header)
+    const yAxisRange = sheet.getRange(2, chartDataStartCol + 1, validWeekData.length, 1); // Averages (skip header)
+    
+    // Build chart
+    const chartBuilder = sheet.newChart()
+      .setChartType(Charts.ChartType.LINE)
+      .addRange(xAxisRange) // X-axis: Weeks
+      .addRange(yAxisRange) // Y-axis: Top 10 Average Position
+      .setPosition(9, 4, 0, 0) // I4 = column 9, row 4
+      .setOption('title', 'トップ20平均掲載順位の推移')
+      .setOption('width', 600)
+      .setOption('height', 400)
+      .setOption('legend', { position: 'none' }) // Single series, no legend needed
+      .setOption('hAxis', { 
+        title: '週',
+        titleTextStyle: { bold: true },
+        slantedText: false,
+        slantedTextAngle: 0,
+        format: 'text' // Ensure X-axis treats values as text/categories
+      })
+      .setOption('vAxis', { 
+        title: '平均掲載順位',
+        titleTextStyle: { bold: true },
+        viewWindow: { min: 0 },
+        direction: -1 // Invert Y-axis (lower is better, so show lower at top)
+      })
+      .setOption('lineWidth', 3)
+      .setOption('pointSize', 5)
+      .setOption('colors', ['#4285f4']); // Blue line
+    
+    const chart = chartBuilder.build();
+    sheet.insertChart(chart);
+    
+    Logger.log(`Successfully created top 20 average position chart at I4`);
+    
+  } catch (error) {
+    Logger.log(`Error creating top 20 average chart: ${error.message}`);
+    Logger.log(`Error stack: ${error.stack}`);
   }
 }
