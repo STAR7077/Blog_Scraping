@@ -1001,14 +1001,6 @@ function runWeeklyProcessor() {
     Logger.log("\nステップ4: 週間ランキングデータをエクスポート中...");
     exportWeeklyRankingsToSpreadsheet(weeklyResults);
     
-    // ステップ4.5: URL平均掲載順位シートを更新
-    Logger.log("\nステップ4.5: URL平均掲載順位シートを更新中...");
-    updateUrlAverageRankingSheet(weeklyResults, dailyData);
-    
-    // ステップ4.6: 国別URL平均掲載順位シートを更新
-    Logger.log("\nステップ4.6: 国別URL平均掲載順位シートを更新中...");
-    createCountryUrlAverageSheets(weeklyResults, dailyData);
-    
     // ステップ5: 有効な場合にチャートを生成
     if (WEEKLY_CONFIG.historicalTracking) {
       Logger.log("\nステップ5: トレンドチャートを生成中...");
@@ -1024,6 +1016,98 @@ function runWeeklyProcessor() {
     
   } catch (error) {
     Logger.log(`週間ランキング処理エラー: ${error.message}`);
+    throw error;
+  }
+}
+
+/**
+ * 週間平均掲載順位機能を独立して実行
+ * URL平均掲載順位シートと国別URL平均掲載順位シートを更新
+ * runWeeklyProcessorとは別に実行可能
+ */
+function runWeeklyAveragePosition() {
+  try {
+    Logger.log("=== 週間平均掲載順位処理を開始 ===");
+    
+    // ステップ1: 既存スプレッドシートから日次データを取得
+    Logger.log("\nステップ1: 日次データを取得中...");
+    const dailyData = getDailyDataFromSpreadsheet();
+    
+    if (!dailyData || dailyData.length === 0) {
+      Logger.log("日次データが見つかりません。まずメイン関数を実行してください。");
+      return;
+    }
+    
+    Logger.log(`Retrieved ${dailyData.length} daily data records`);
+    
+    // ステップ2: 週間データを取得または生成
+    Logger.log("\nステップ2: 週間データを取得中...");
+    let weeklyResults;
+    
+    // Try to get weekly data from existing spreadsheet first
+    const spreadsheet = getOrCreateSpreadsheet();
+    const weeklySheet = spreadsheet.getSheetByName("週間ランキング");
+    
+    if (weeklySheet && weeklySheet.getLastRow() > 1) {
+      // If weekly ranking sheet exists, try to use it
+      Logger.log("週間ランキングシートからデータを取得中...");
+      const weeklyProcessor = new WeeklyProcessor();
+      try {
+        weeklyResults = weeklyProcessor.processWeeklyRankings(dailyData);
+        Logger.log(`週間データを取得: ${weeklyResults.weeklyData ? weeklyResults.weeklyData.length : 0} レコード`);
+      } catch (processingError) {
+        Logger.log(`週間データ処理に失敗: ${processingError.message}`);
+        Logger.log("フォールバック空の結果を作成中...");
+        weeklyResults = {
+          weeklyData: [],
+          rankings: {},
+          trends: {},
+          reports: []
+        };
+      }
+    } else {
+      // If no weekly sheet exists, process weekly data from daily data
+      Logger.log("週間ランキングシートが見つかりません。日次データから週間データを生成中...");
+      const weeklyProcessor = new WeeklyProcessor();
+      try {
+        weeklyResults = weeklyProcessor.processWeeklyRankings(dailyData);
+        Logger.log(`週間データを生成: ${weeklyResults.weeklyData ? weeklyResults.weeklyData.length : 0} レコード`);
+      } catch (processingError) {
+        Logger.log(`週間データ処理に失敗: ${processingError.message}`);
+        Logger.log("フォールバック空の結果を作成中...");
+        weeklyResults = {
+          weeklyData: [],
+          rankings: {},
+          trends: {},
+          reports: []
+        };
+      }
+    }
+    
+    if (!weeklyResults || !weeklyResults.weeklyData || weeklyResults.weeklyData.length === 0) {
+      Logger.log("警告: 週間データが空です。日次データから直接計算します。");
+      // Create minimal weeklyResults structure for functions that need it
+      weeklyResults = {
+        weeklyData: [],
+        rankings: {},
+        trends: {},
+        reports: []
+      };
+    }
+    
+    // ステップ3: URL平均掲載順位シートを更新
+    Logger.log("\nステップ3: URL平均掲載順位シートを更新中...");
+    updateUrlAverageRankingSheet(weeklyResults, dailyData);
+    
+    // ステップ4: 国別URL平均掲載順位シートを更新
+    Logger.log("\nステップ4: 国別URL平均掲載順位シートを更新中...");
+    createCountryUrlAverageSheets(weeklyResults, dailyData);
+    
+    Logger.log("=== 週間平均掲載順位処理完了 ===");
+    
+  } catch (error) {
+    Logger.log(`週間平均掲載順位処理エラー: ${error.message}`);
+    Logger.log(`エラースタック: ${error.stack}`);
     throw error;
   }
 }
@@ -1736,6 +1820,29 @@ function updateUrlAverageRankingSheet(weeklyResults, dailyData) {
       });
     }
     
+    // Check if existing column has data - if so, skip recalculation
+    if (targetColumnIndex) {
+      // Fast check: sample only first 20 rows instead of reading all rows (much faster)
+      const sampleSize = Math.min(20, urlRows.length);
+      const sampleRange = sheet.getRange(3, targetColumnIndex, sampleSize, 1);
+      const sampleValues = sampleRange.getValues();
+      const hasData = sampleValues.some(row => {
+        const val = row[0];
+        return val !== null && val !== '' && typeof val === 'number' && !isNaN(val) && val > 0;
+      });
+      
+      if (hasData) {
+        Logger.log(`Skipping recalculation for week ${latestWeekKey} - using existing values from column ${targetColumnIndex}`);
+        // Just ensure formatting is applied, but don't recalculate
+        applyUrlAverageFormatting(sheet, targetColumnIndex, urlRows.length);
+        // Still create/update chart
+        createTop10AverageChart(sheet);
+        return; // Skip recalculation
+      } else {
+        Logger.log(`Existing column ${targetColumnIndex} for week ${latestWeekKey} has no data - will calculate new values`);
+      }
+    }
+    
     if (!targetColumnIndex) {
       // Insert new column at column C to keep the newest week first
       Logger.log(`Inserting new week column at C for ${latestWeekKey}`);
@@ -1988,16 +2095,7 @@ function getWeekKeysFromMainSheet(sheet) {
   
   weekHeaderValues.forEach((value, idx) => {
     if (value && value.toString().trim()) {
-      const weekKey = value.toString().trim();
-      // Skip numeric values that are not valid week strings
-      if (isNumericValue(weekKey)) {
-        Logger.log(`Skipping numeric week key from header: "${weekKey}"`);
-        return;
-      }
-      // Skip header text
-      if (weekKey !== "週" && weekKey !== "平均掲載順位") {
-        weekKeys.push(weekKey);
-      }
+      weekKeys.push(value.toString().trim());
     }
   });
   
@@ -2099,6 +2197,27 @@ function updateCountryUrlAverageSheet(country, weeklyData, dailyData, urlRows, w
         }
       }
       
+      // If column already exists, check if it has data - if so, skip recalculation
+      if (existingColumn) {
+        // Fast check: sample only first 20 rows instead of reading all rows (much faster)
+        const sampleSize = Math.min(20, urlRows.length);
+        const sampleRange = sheet.getRange(3, existingColumn, sampleSize, 1);
+        const sampleValues = sampleRange.getValues();
+        const hasData = sampleValues.some(row => {
+          const val = row[0];
+          return val !== null && val !== '' && typeof val === 'number' && !isNaN(val) && val > 0;
+        });
+        
+        if (hasData) {
+          Logger.log(`Skipping recalculation for ${country} week ${weekKey} - using existing values from column ${existingColumn}`);
+          // Just ensure formatting is applied, but don't recalculate
+          applyCountryUrlAverageFormatting(sheet, existingColumn, urlRows.length);
+          return; // Skip to next week
+        } else {
+          Logger.log(`Existing column ${existingColumn} for ${country} week ${weekKey} has no data - will calculate new values`);
+        }
+      }
+      
       // Check cache first to avoid recalculating the same week
       const cacheKey = `${country}|${weekKey}`;
       let countryAverageMap = calculatedAveragesCache.get(cacheKey);
@@ -2128,7 +2247,7 @@ function updateCountryUrlAverageSheet(country, weeklyData, dailyData, urlRows, w
       });
       
       if (existingColumn) {
-        // Update existing column
+        // Update existing column (only if it had no data)
         Logger.log(`Updating existing column for ${country} week ${weekKey} at column ${existingColumn}`);
         
         const dataRange = sheet.getRange(3, existingColumn, columnValues.length, 1);
@@ -2152,15 +2271,31 @@ function updateCountryUrlAverageSheet(country, weeklyData, dailyData, urlRows, w
             if (scanKey !== "週" && scanKey !== "平均掲載順位") {
               const normalizedScan = normalizeWeekKeyForComparison(scanKey);
               if (normalizedTarget === normalizedScan) {
-                Logger.log(`WARNING: Week ${weekKey} already exists at column ${scanCol} (as "${scanKey}"). Updating existing column instead of creating duplicate.`);
+                Logger.log(`WARNING: Week ${weekKey} already exists at column ${scanCol} (as "${scanKey}").`);
                 existingColumn = scanCol;
                 foundDuplicate = true;
-                // Update existing column instead
-                const dataRange = sheet.getRange(3, existingColumn, columnValues.length, 1);
-                const valuesArray = columnValues.map(v => [v === '' ? '' : v]);
-                dataRange.setValues(valuesArray);
-                dataRange.setNumberFormat("0");
-                applyCountryUrlAverageFormatting(sheet, existingColumn, urlRows.length);
+                
+                // Check if column already has data - if so, skip recalculation
+                const sampleSize = Math.min(20, urlRows.length);
+                const sampleRange = sheet.getRange(3, existingColumn, sampleSize, 1);
+                const sampleValues = sampleRange.getValues();
+                const hasData = sampleValues.some(row => {
+                  const val = row[0];
+                  return val !== null && val !== '' && typeof val === 'number' && !isNaN(val) && val > 0;
+                });
+                
+                if (hasData) {
+                  Logger.log(`Using existing values from column ${existingColumn} - skipping recalculation`);
+                  applyCountryUrlAverageFormatting(sheet, existingColumn, urlRows.length);
+                } else {
+                  // Update existing column with calculated values (only if no data exists)
+                  Logger.log(`Updating existing column ${existingColumn} with calculated values (no existing data found)`);
+                  const dataRange = sheet.getRange(3, existingColumn, columnValues.length, 1);
+                  const valuesArray = columnValues.map(v => [v === '' ? '' : v]);
+                  dataRange.setValues(valuesArray);
+                  dataRange.setNumberFormat("0");
+                  applyCountryUrlAverageFormatting(sheet, existingColumn, urlRows.length);
+                }
                 break;
               }
             }
@@ -2842,7 +2977,7 @@ function runLast3WeeksAveragePosition() {
 
 /**
  * Get weekly average position for the last 3 weeks (rounded to integers)
- * Calculates averages for: 11/3-11/9, 10/27-11/2, 10/20-10/26
+ * Calculates averages for: 11/17-11/23, 11/10-11/16, 11/3-11/9
  * @param {Array} weeklyData - Weekly aggregated data
  * @param {Array} dailyData - Daily data (for fallback calculation)
  * @return {Object} Object with week keys and URL average positions (integers)
@@ -2851,11 +2986,11 @@ function getLast3WeeksAveragePosition(weeklyData, dailyData) {
   try {
     Logger.log("=== Calculating Last 3 Weeks Average Position ===");
     
-    // Define the 3 target weeks (assuming 2025)
+    // Define the 3 target weeks (last 3 weeks)
     const targetWeeks = [      
-      "2025/11/10 - 2025/11/16",
-      "2025/11/03 - 2025/11/09",  // Week 1: 11/3-11/9
-      "2025/10/27 - 2025/11/02",  // Week 2: 10/27-11/2
+      "2025/11/17 - 2025/11/23",  // Week 1: 11/17-11/23 (newest)
+      "2025/11/10 - 2025/11/16",  // Week 2: 11/10-11/16
+      "2025/11/03 - 2025/11/09",  // Week 3: 11/3-11/9 (oldest)
     ];
     
     const result = {};
@@ -2964,11 +3099,11 @@ function updateUrlAverageRankingSheetLast3Weeks(weeklyData, dailyData) {
       return;
     }
     
-    // Define week order (newest first)
+    // Define week order (newest first) - must match getLast3WeeksAveragePosition
     const weekKeys = [
-      "2025/11/10 - 2025/11/16",
-      "2025/11/03 - 2025/11/09",  // Week 1: 11/3-11/9 (newest)
-      "2025/10/27 - 2025/11/02",  // Week 2: 10/27-11/2
+      "2025/11/17 - 2025/11/23",  // Week 1: 11/17-11/23 (newest)
+      "2025/11/10 - 2025/11/16",  // Week 2: 11/10-11/16
+      "2025/11/03 - 2025/11/09",  // Week 3: 11/3-11/9 (oldest)
     ];
     
     // Check existing columns and update/create as needed
@@ -2997,7 +3132,8 @@ function updateUrlAverageRankingSheetLast3Weeks(weeklyData, dailyData) {
     const allFormatRanges = [];
     
     // Process each week in order
-    weekKeys.forEach((weekKey, weekIndex) => {
+    for (let weekIndex = 0; weekIndex < weekKeys.length; weekIndex++) {
+      const weekKey = weekKeys[weekIndex];
       const targetColumn = startColumn + weekIndex;
       const weekData = last3WeeksData[weekKey] || {};
       
@@ -3016,18 +3152,37 @@ function updateUrlAverageRankingSheetLast3Weeks(weeklyData, dailyData) {
       allDataValues.push(columnValues);
       
       if (existingWeekColumns[weekKey]) {
-        // Update existing column
+        // Check if existing column has data - if so, skip recalculation
         const existingColumn = existingWeekColumns[weekKey];
-        Logger.log(`Updating existing column for week ${weekKey} at column ${existingColumn}`);
-        columnsToUpdate.push({
-          column: existingColumn,
-          weekKey: weekKey,
-          values: columnValues
+        const sampleSize = Math.min(20, urlRows.length);
+        const sampleRange = sheet.getRange(3, existingColumn, sampleSize, 1);
+        const sampleValues = sampleRange.getValues();
+        const hasData = sampleValues.some(row => {
+          const val = row[0];
+          return val !== null && val !== '' && typeof val === 'number' && !isNaN(val) && val > 0;
         });
-        allFormatRanges.push({
-          range: sheet.getRange(3, existingColumn, urlRows.length, 1),
-          column: existingColumn
-        });
+        
+        if (hasData) {
+          Logger.log(`Skipping recalculation for week ${weekKey} - using existing values from column ${existingColumn}`);
+          // Just ensure formatting is applied, but don't recalculate
+          allFormatRanges.push({
+            range: sheet.getRange(3, existingColumn, urlRows.length, 1),
+            column: existingColumn
+          });
+          continue; // Skip to next week
+        } else {
+          // Update existing column (only if it had no data)
+          Logger.log(`Updating existing column for week ${weekKey} at column ${existingColumn} (no existing data found)`);
+          columnsToUpdate.push({
+            column: existingColumn,
+            weekKey: weekKey,
+            values: columnValues
+          });
+          allFormatRanges.push({
+            range: sheet.getRange(3, existingColumn, urlRows.length, 1),
+            column: existingColumn
+          });
+        }
       } else {
         // Need to create new column
         columnsToCreate.push({
@@ -3040,7 +3195,7 @@ function updateUrlAverageRankingSheetLast3Weeks(weeklyData, dailyData) {
           column: targetColumn
         });
       }
-    });
+    }
     
     // Batch create columns first
     if (columnsToCreate.length > 0) {
@@ -3889,14 +4044,11 @@ function createTrendDashboard() {
 
 /**
  * Calculate the average of top 20 lowest average positions for each week
- * Gets week data directly from the provided sheet (works for main sheet or country sheets)
- * Limits to last 12 weeks if available, only includes weeks with valid data
- * @param {GoogleAppsScript.Spreadsheet.Sheet} sheet - The sheet to analyze (main or country sheet)
+ * @param {GoogleAppsScript.Spreadsheet.Sheet} sheet - The sheet to analyze
  * @return {Array} Array of [weekKey, average] pairs
  */
 function calculateTop10AverageByWeek(sheet) {
   try {
-    // Get week keys directly from this sheet (works for any sheet including country sheets)
     let weekKeys = getWeekKeysFromMainSheet(sheet);
     if (weekKeys.length === 0) {
       Logger.log("No week keys found for top 20 average calculation");
@@ -3917,7 +4069,7 @@ function calculateTop10AverageByWeek(sheet) {
     
     Logger.log(`Deduplicated ${weekKeys.length} week keys to ${uniqueWeekKeys.length} unique weeks`);
     
-    // Limit to last 12 weeks (if available)
+    // Limit to last 12 weeks
     // First, sort by date (newest first) to get the most recent weeks
     const weekKeysWithDates = uniqueWeekKeys.map(weekKey => ({
       weekKey: weekKey,
@@ -3925,11 +4077,11 @@ function calculateTop10AverageByWeek(sheet) {
     })).filter(item => item.date !== null)
       .sort((a, b) => b.date.getTime() - a.date.getTime()); // Newest first
     
-    // Take only the last 12 weeks (most recent) - or all available if less than 12
+    // Take only the last 12 weeks (most recent)
     const recentWeeks = weekKeysWithDates.slice(0, 12);
     const finalWeekKeys = recentWeeks.map(item => item.weekKey);
     
-    Logger.log(`Limiting chart to last ${finalWeekKeys.length} weeks (out of ${weekKeysWithDates.length} total unique weeks available in sheet)`);
+    Logger.log(`Limiting chart to last ${finalWeekKeys.length} weeks (out of ${weekKeysWithDates.length} total unique weeks)`);
     
     const lastRow = sheet.getLastRow();
     if (lastRow < 3) {
